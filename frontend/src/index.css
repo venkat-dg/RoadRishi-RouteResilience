@@ -1,0 +1,119 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap');
+
+@import "tailwindcss";
+
+:root {
+  --bg-base:       #0B0F1A;
+  --bg-card:       #0F1724;
+  --bg-elevated:   #131929;
+  --border:        #1E2D45;
+  --border-bright: #2A3347;
+  --accent-blue:   #3B82F6;
+  --accent-green:  #22C55E;
+  --accent-yellow: #EAB308;
+  --accent-red:    #EF4444;
+  --accent-purple: #A855F7;
+  --accent-cyan:   #00E5FF;
+  --text-primary:  #F1F5F9;
+  --text-secondary:#94A3B8;
+  --text-muted:    #475569;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--bg-base);
+  color: var(--text-primary);
+  font-family: 'Inter', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.font-outfit {
+  font-family: 'Outfit', sans-serif;
+}
+
+.font-mono {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(11, 15, 26, 0.5);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-bright);
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* Custom glass styling */
+.glass-panel {
+  background: rgba(15, 23, 36, 0.75);
+  backdrop-filter: blur(12px);
+  border-color: var(--border);
+}
+
+.glass-card {
+  background: rgba(19, 25, 41, 0.5);
+  border-color: var(--border);
+}
+
+/* Leaflet dark theme styling overrides */
+.leaflet-container {
+  background: var(--bg-base) !important;
+  font-family: 'Inter', sans-serif !important;
+}
+
+.leaflet-bar {
+  border: 1px solid var(--border) !important;
+  box-shadow: none !important;
+}
+
+.leaflet-bar a {
+  background-color: var(--bg-card) !important;
+  color: var(--text-primary) !important;
+  border-bottom: 1px solid var(--border) !important;
+  transition: all 0.2s;
+}
+
+.leaflet-bar a:hover {
+  background-color: var(--bg-elevated) !important;
+  color: var(--accent-blue) !important;
+}
+
+.leaflet-popup-content-wrapper {
+  background: var(--bg-elevated) !important;
+  color: var(--text-primary) !important;
+  border: 1px solid var(--border-bright) !important;
+  border-radius: 8px !important;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5) !important;
+}
+
+.leaflet-popup-tip {
+  background: var(--bg-elevated) !important;
+  border: 1px solid var(--border-bright) !important;
+}
+
+/* Custom range input track resets */
+input[type=range]::-webkit-slider-runnable-track {
+  background: transparent;
+}
+input[type=range]::-moz-range-track {
+  background: transparent;
+}
