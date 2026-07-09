@@ -1,0 +1,9 @@
+torch>=2.1
+torchvision
+transformers>=4.37
+albumentations>=1.4
+evaluate
+scikit-learn
+tqdm
+Pillow
+numpy>=1.24
