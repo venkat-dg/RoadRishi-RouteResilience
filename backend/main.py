@@ -257,21 +257,19 @@ def checkpoint_status():
     Returns whether the SegFormer real checkpoint is loaded
     or the system is running in simulation mode.
     """
-    checkpoint_path = os.path.join(
-        os.path.dirname(__file__), "..", "training", "checkpoints", "roadrishi_finetuned.pth"
-    )
-    real_loaded = os.path.exists(checkpoint_path)
+    status = model_core.get_status()
     return {
-        "mode": "live_model" if real_loaded else "simulation",
-        "checkpoint_path": checkpoint_path,
-        "checkpoint_exists": real_loaded,
+        "mode": status["mode"],
+        "checkpoint_exists": model_core.is_live,
         "osmnx_available": OSMNX_AVAILABLE,
+        "device": status["device"],
         "message": (
             "Real SegFormer checkpoint loaded — live inference active."
-            if real_loaded
-            else "Running in simulation mode. Train and export checkpoint to enable live inference."
+            if model_core.is_live
+            else "Running in simulation mode. Place roadrishi_finetuned.pth in training/checkpoints/ to enable live inference."
         ),
     }
+
 
 
 # Serving the static frontend code

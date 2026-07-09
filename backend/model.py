@@ -1,9 +1,11 @@
+import os
 import numpy as np
 
-# Try importing torch to look professional; if not present, we use numpy structures.
+# Try importing torch; if not present, simulation mode is used.
 try:
     import torch
     import torch.nn as nn
+    import torch.nn.functional as F
     HAS_TORCH = True
 except ImportError:
     HAS_TORCH = False
@@ -11,18 +13,141 @@ except ImportError:
     nn = nn_Module
     nn.Module = object
 
+# Try importing transformers for real SegFormer inference
+try:
+    from transformers import SegformerForSemanticSegmentation
+    HAS_TRANSFORMERS = True
+except ImportError:
+    HAS_TRANSFORMERS = False
+
+# Default checkpoint path (relative to this file)
+DEFAULT_CHECKPOINT = os.path.join(
+    os.path.dirname(__file__), "..", "training", "checkpoints", "roadrishi_finetuned.pth"
+)
+
 base_class = nn.Module if HAS_TORCH else object
 
 class RoadSegFormer(base_class):
     """
-    Simulates the SegFormer MiT-B3 Hierarchical Attention core.
-    Takes 4-channel tensors [G, R, NIR, NDVI] and predicts calibrated road probability
-    maps and attention matrices, including simulated tree canopy and shadow occlusions.
+    SegFormer MiT-B3 Road Segmentation model wrapper.
+
+    Modes:
+      - Simulation (default): generates realistic synthetic road probability maps
+        using the numpy-based pipeline. Works with zero dependencies beyond numpy.
+      - Live inference: loads a real trained checkpoint (roadrishi_finetuned.pth)
+        and runs actual SegFormer inference. Requires torch + transformers.
+
+    The mode is selected automatically: if the checkpoint file exists and
+    torch + transformers are installed, real inference is used. Otherwise
+    the simulation fallback is used transparently.
     """
-    def __init__(self, temperature=1.0):
+    def __init__(self, temperature=1.0, checkpoint_path=None):
         if HAS_TORCH:
             super().__init__()
         self.temperature = temperature
+        self.real_model = None
+        self.device = "cpu"
+        self.is_live = False
+
+        # Auto-load checkpoint if available
+        ckpt = checkpoint_path or DEFAULT_CHECKPOINT
+        self.load_checkpoint(ckpt)
+
+    # ------------------------------------------------------------------
+    # Real inference methods
+    # ------------------------------------------------------------------
+    def load_checkpoint(self, checkpoint_path: str) -> bool:
+        """
+        Attempts to load a trained SegFormer checkpoint from *checkpoint_path*.
+        Returns True if successful, False if file not found or deps missing.
+        The simulation fallback remains active on failure.
+        """
+        if not os.path.exists(checkpoint_path):
+            print(f"[RoadSegFormer] No checkpoint at {checkpoint_path} — using simulation mode.")
+            return False
+
+        if not (HAS_TORCH and HAS_TRANSFORMERS):
+            print("[RoadSegFormer] torch/transformers not installed — using simulation mode.")
+            return False
+
+        try:
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+
+            self.real_model = SegformerForSemanticSegmentation.from_pretrained(
+                "nvidia/segformer-b3-finetuned-ade-512-512",
+                num_labels=2,
+                id2label={0: "background", 1: "road"},
+                label2id={"background": 0, "road": 1},
+                ignore_mismatched_sizes=True,
+            )
+
+            # Strip DataParallel prefix if saved from multi-GPU training
+            state = ckpt.get("model_state_dict", ckpt)
+            state = {k.replace("module.", ""): v for k, v in state.items()}
+            self.real_model.load_state_dict(state, strict=False)
+            self.real_model.to(self.device)
+            self.real_model.eval()
+
+            self.is_live = True
+            val_miou = ckpt.get("val_miou", "N/A")
+            print(f"[RoadSegFormer] Live model loaded ✓  val_mIoU={val_miou}  device={self.device}")
+            return True
+
+        except Exception as e:
+            print(f"[RoadSegFormer] Failed to load checkpoint: {e} — falling back to simulation.")
+            self.real_model = None
+            self.is_live = False
+            return False
+
+    def predict_from_image(self, image_array: np.ndarray) -> np.ndarray:
+        """
+        Runs real SegFormer inference on a single RGB image (H, W, 3) numpy array.
+        Returns a road probability map of shape (H, W) with values in [0, 1].
+        Falls back to simulate_scene_inference if not in live mode.
+        """
+        if not self.is_live or self.real_model is None:
+            h, w = image_array.shape[:2]
+            sim = self.simulate_scene_inference(w, h, self.temperature)
+            return sim["probabilities"]
+
+        import torch
+        # Normalize to ImageNet stats
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        img = image_array.astype(np.float32) / 255.0
+        img = (img - mean) / std  # (H, W, 3)
+
+        # To tensor: (1, 3, H, W)
+        tensor = torch.from_numpy(img.transpose(2, 0, 1)).unsqueeze(0).to(self.device)
+
+        with torch.no_grad():
+            outputs = self.real_model(pixel_values=tensor)
+            logits  = outputs.logits  # (1, 2, H/4, W/4)
+            upsampled = F.interpolate(
+                logits, size=image_array.shape[:2], mode="bilinear", align_corners=False
+            )
+            probs = torch.softmax(upsampled, dim=1)[0, 1].cpu().numpy()  # road channel
+
+        return probs  # (H, W) float32
+
+    def predict_tile_batch(self, tiles: list) -> list:
+        """
+        Runs batched inference over a list of image tiles (each H×W×3 numpy array).
+        Returns a list of road probability maps.
+        """
+        return [self.predict_from_image(tile) for tile in tiles]
+
+    def get_status(self) -> dict:
+        """Returns the current inference mode and device."""
+        return {
+            "mode": "live_model" if self.is_live else "simulation",
+            "device": self.device if self.is_live else "cpu (numpy)",
+            "has_torch": HAS_TORCH,
+            "has_transformers": HAS_TRANSFORMERS,
+        }
+
+
 
     def sigmoid(self, x):
         return 1.0 / (1.0 + np.exp(-x))
