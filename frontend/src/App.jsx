@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { MapContainer, TileLayer, Polyline, Polygon, CircleMarker, Popup, useMap } from 'react-leaflet';
 import { BarChart, Bar, XAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
 import {
@@ -16,7 +16,10 @@ import {
   ChevronDown,
   LineChart,
   Eye,
-  EyeOff
+  EyeOff,
+  Globe,
+  Zap,
+  Database
 } from 'lucide-react';
 
 // --- MOCK DATA ---
@@ -200,9 +203,71 @@ function CustomSlider({ label, min, max, step, value, onChange, theme = 'blue' }
   );
 }
 
+const API_BASE = 'http://localhost:8000';
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('Segmentation');
   const [scene, setScene] = useState('Bengaluru Urban 5km²');
+
+  // ── OSM / Data Source state ──────────────────────────────────────────────
+  const [dataSource, setDataSource] = useState('simulation'); // 'simulation' | 'osm'
+  const [osmCity, setOsmCity] = useState('Bengaluru');
+  const [disruptionMode, setDisruptionMode] = useState('random');
+  const [disruptionPct, setDisruptionPct] = useState(0.30);
+  const [osmLoading, setOsmLoading] = useState(false);
+  const [osmData, setOsmData] = useState(null);          // raw API response
+  const [osmError, setOsmError] = useState(null);
+  const [checkpointMode, setCheckpointMode] = useState('simulation'); // 'simulation' | 'live_model'
+
+  // OSM city configs for map centering
+  const CITY_CENTERS = {
+    Bengaluru:  [12.9716, 77.5946],
+    Chennai:    [13.0827, 80.2707],
+    Hyderabad:  [17.3850, 78.4867],
+    Pune:       [18.5204, 73.8567],
+    Mumbai:     [19.0760, 72.8777],
+  };
+
+  // Fetch checkpoint status on mount
+  useEffect(() => {
+    fetch(`${API_BASE}/api/checkpoint-status`)
+      .then(r => r.json())
+      .then(d => setCheckpointMode(d.mode))
+      .catch(() => setCheckpointMode('simulation'));
+  }, []);
+
+  // Fetch OSM pipeline when OSM mode is active
+  const fetchOSMData = useCallback(() => {
+    setOsmLoading(true);
+    setOsmError(null);
+    const params = new URLSearchParams({
+      city: osmCity,
+      disruption_pct: disruptionPct.toFixed(2),
+      disruption_mode: disruptionMode,
+      mc_samples: 15,
+    });
+    fetch(`${API_BASE}/api/osm-pipeline?${params}`)
+      .then(r => r.json())
+      .then(data => {
+        setOsmData(data);
+        setOsmLoading(false);
+        // Re-center map on selected city
+        setMapCenter(CITY_CENTERS[osmCity] || [12.9716, 77.5946]);
+        setMapZoom(13);
+        setToastMessage(`OSM graph loaded — ${data.meta?.original_nodes ?? '?'} nodes, ${data.meta?.original_edges ?? '?'} edges`);
+        setShowToast(true);
+        setTimeout(() => setShowToast(false), 4000);
+      })
+      .catch(err => {
+        setOsmError('Backend not reachable — start the FastAPI server.');
+        setOsmLoading(false);
+      });
+  }, [osmCity, disruptionPct, disruptionMode]);
+
+  // Derived OSM graph layers (edges as polylines)
+  const osmEdges = osmData?.graphs?.disrupted?.edges ?? [];
+  const osmNodes = osmData?.graphs?.disrupted?.nodes ?? [];
+  const osmMetrics = osmData?.metrics ?? null;
   
   // Sliders state
   const [confidenceThreshold, setConfidenceThreshold] = useState(0.50);
@@ -374,6 +439,15 @@ export default function App() {
 
         {/* Right - Badges */}
         <div className="flex items-center gap-2.5">
+          {/* Checkpoint status badge */}
+          <div className={`px-3 py-1 rounded-[4px] text-[11px] font-semibold flex items-center gap-1.5 border ${
+            checkpointMode === 'live_model'
+              ? 'bg-emerald-950/30 border-emerald-900/60 text-emerald-400'
+              : 'bg-slate-900/60 border-slate-700 text-slate-400'
+          }`}>
+            {checkpointMode === 'live_model' ? <Zap size={10} /> : <Database size={10} />}
+            {checkpointMode === 'live_model' ? 'Live Model' : 'Sim Mode'}
+          </div>
           <div className="border border-[var(--accent-blue)] text-[var(--accent-blue)] bg-transparent px-3 py-1 rounded-[4px] text-[11px] font-semibold tracking-wider font-outfit uppercase">
             ISRO H2S 2026
           </div>
@@ -399,22 +473,131 @@ export default function App() {
               <div className="w-[3px] h-[14px] bg-[var(--accent-blue)] rounded-sm" />
               <span className="text-[10px] font-bold tracking-widest text-slate-400 uppercase">INPUT</span>
             </div>
-            
-            <div className="mb-8">
-              <label className="block text-[11px] text-[#64748B] mb-1.5">Scene</label>
-              <div className="relative">
-                <select
-                  value={scene}
-                  onChange={(e) => setScene(e.target.value)}
-                  className="w-full bg-[var(--bg-elevated)] border border-[var(--border-bright)] rounded-md text-[13px] text-[#E2E8F0] p-2 pr-8 appearance-none focus:outline-none focus:border-[var(--accent-blue)] focus:ring-[3px] focus:ring-blue-500/15 cursor-pointer font-medium"
+
+            {/* ── Data Source Toggle ── */}
+            <div className="mb-6">
+              <label className="block text-[11px] text-[#64748B] mb-1.5">Data Source</label>
+              <div className="flex items-center bg-[var(--bg-elevated)] border border-[var(--border-bright)] rounded-md p-1 overflow-hidden select-none w-full">
+                <button
+                  onClick={() => setDataSource('simulation')}
+                  className={`flex-1 py-1.5 text-xs font-semibold rounded-md transition-all text-center cursor-pointer flex items-center justify-center gap-1 ${
+                    dataSource === 'simulation'
+                      ? 'bg-[var(--border)] text-white shadow'
+                      : 'text-[var(--text-secondary)] hover:text-white'
+                  }`}
                 >
-                  <option>Bengaluru Urban 5km²</option>
-                  <option>Forested Suburban</option>
-                  <option>Rural Highway</option>
-                </select>
-                <ChevronDown size={14} className="absolute right-2.5 top-1/2 transform -translate-y-1/2 text-[#64748B] pointer-events-none" />
+                  <Satellite size={10} /> Simulation
+                </button>
+                <button
+                  onClick={() => setDataSource('osm')}
+                  className={`flex-1 py-1.5 text-xs font-semibold rounded-md transition-all text-center cursor-pointer flex items-center justify-center gap-1 ${
+                    dataSource === 'osm'
+                      ? 'bg-blue-900/60 text-blue-300 shadow'
+                      : 'text-[var(--text-secondary)] hover:text-white'
+                  }`}
+                >
+                  <Globe size={10} /> Real OSM
+                </button>
               </div>
             </div>
+
+            {/* ── OSM Controls (shown only in OSM mode) ── */}
+            {dataSource === 'osm' && (
+              <div className="space-y-4 mb-4 animate-pulse-once">
+                {/* City selector */}
+                <div>
+                  <label className="block text-[11px] text-[#64748B] mb-1.5">City</label>
+                  <div className="relative">
+                    <select
+                      value={osmCity}
+                      onChange={(e) => setOsmCity(e.target.value)}
+                      className="w-full bg-[var(--bg-elevated)] border border-[var(--border-bright)] rounded-md text-[13px] text-[#E2E8F0] p-2 pr-8 appearance-none focus:outline-none focus:border-[var(--accent-blue)] focus:ring-[3px] focus:ring-blue-500/15 cursor-pointer font-medium"
+                    >
+                      {['Bengaluru','Chennai','Hyderabad','Pune','Mumbai'].map(c => (
+                        <option key={c}>{c}</option>
+                      ))}
+                    </select>
+                    <ChevronDown size={14} className="absolute right-2.5 top-1/2 transform -translate-y-1/2 text-[#64748B] pointer-events-none" />
+                  </div>
+                </div>
+
+                {/* Disruption mode */}
+                <div>
+                  <label className="block text-[11px] text-[#64748B] mb-1.5">Disruption Mode</label>
+                  <div className="relative">
+                    <select
+                      value={disruptionMode}
+                      onChange={(e) => setDisruptionMode(e.target.value)}
+                      className="w-full bg-[var(--bg-elevated)] border border-[var(--border-bright)] rounded-md text-[13px] text-[#E2E8F0] p-2 pr-8 appearance-none focus:outline-none focus:border-[var(--accent-blue)] focus:ring-[3px] focus:ring-blue-500/15 cursor-pointer font-medium"
+                    >
+                      <option value="random">Random (Flood / EQ)</option>
+                      <option value="bridge">Bridge Attack (BC)</option>
+                      <option value="cascade">Cascade Failure</option>
+                      <option value="node">Hub Removal</option>
+                    </select>
+                    <ChevronDown size={14} className="absolute right-2.5 top-1/2 transform -translate-y-1/2 text-[#64748B] pointer-events-none" />
+                  </div>
+                </div>
+
+                {/* Disruption % slider */}
+                <CustomSlider
+                  label={`Disruption Intensity (${Math.round(disruptionPct * 100)}%)`}
+                  min={0.05}
+                  max={0.90}
+                  step={0.05}
+                  value={disruptionPct}
+                  onChange={setDisruptionPct}
+                  theme="blue"
+                />
+
+                {/* Load Graph button */}
+                <button
+                  onClick={fetchOSMData}
+                  disabled={osmLoading}
+                  className="w-full py-2 bg-gradient-to-r from-blue-900 to-blue-700 hover:from-blue-800 hover:to-blue-600 disabled:opacity-50 rounded-md text-white font-semibold text-[12px] flex items-center justify-center gap-2 cursor-pointer transition-all duration-150"
+                >
+                  {osmLoading ? <><RotateCw size={12} className="animate-spin" /> Loading...</> : <><Globe size={12} /> Load OSM Graph</>}
+                </button>
+
+                {/* OSM metrics summary */}
+                {osmData && (
+                  <div className="bg-blue-950/20 border border-blue-900/40 rounded-md p-2.5 text-[11px] space-y-1 font-mono">
+                    <div className="text-blue-300 font-semibold text-[10px] uppercase tracking-wider mb-1.5">OSM Result</div>
+                    <div className="flex justify-between"><span className="text-slate-400">City</span><span className="text-white">{osmData.meta?.city}</span></div>
+                    <div className="flex justify-between"><span className="text-slate-400">Nodes</span><span className="text-white">{osmData.meta?.original_nodes}</span></div>
+                    <div className="flex justify-between"><span className="text-slate-400">Edges (pre)</span><span className="text-white">{osmData.meta?.original_edges}</span></div>
+                    <div className="flex justify-between"><span className="text-slate-400">Edges (post)</span><span className="text-red-400">{osmData.meta?.disrupted_edges}</span></div>
+                    <div className="flex justify-between"><span className="text-slate-400">RI</span><span className="text-emerald-400 font-bold">{osmData.metrics?.RI_estimate?.toFixed(3)}</span></div>
+                    {osmData.meta?.using_real_osm && (
+                      <div className="mt-1.5 text-emerald-400 text-[9px] font-semibold flex items-center gap-1"><Globe size={9} /> Real OSM data</div>
+                    )}
+                  </div>
+                )}
+
+                {osmError && (
+                  <div className="bg-red-950/30 border border-red-900/40 rounded-md p-2 text-[11px] text-red-400">{osmError}</div>
+                )}
+              </div>
+            )}
+
+            {/* ── Simulation scene selector (shown only in simulation mode) ── */}
+            {dataSource === 'simulation' && (
+              <div className="mb-8">
+                <label className="block text-[11px] text-[#64748B] mb-1.5">Scene</label>
+                <div className="relative">
+                  <select
+                    value={scene}
+                    onChange={(e) => setScene(e.target.value)}
+                    className="w-full bg-[var(--bg-elevated)] border border-[var(--border-bright)] rounded-md text-[13px] text-[#E2E8F0] p-2 pr-8 appearance-none focus:outline-none focus:border-[var(--accent-blue)] focus:ring-[3px] focus:ring-blue-500/15 cursor-pointer font-medium"
+                  >
+                    <option>Bengaluru Urban 5km²</option>
+                    <option>Forested Suburban</option>
+                    <option>Rural Highway</option>
+                  </select>
+                  <ChevronDown size={14} className="absolute right-2.5 top-1/2 transform -translate-y-1/2 text-[#64748B] pointer-events-none" />
+                </div>
+              </div>
+            )}
 
             <div className="mb-8">
               <label className="block text-[11px] text-[#64748B] mb-1.5">Band Config</label>
@@ -795,11 +978,49 @@ export default function App() {
                 />
               ))}
 
+              {/* OSM Graph edges overlay (Real OSM mode) */}
+              {dataSource === 'osm' && osmEdges.map((edge, i) => (
+                <Polyline
+                  key={`osm-edge-${i}`}
+                  positions={[edge.u_pos, edge.v_pos]}
+                  pathOptions={{
+                    color: edge.healed ? '#39FF14' : '#00E5FF',
+                    weight: 1.5,
+                    opacity: 0.7,
+                  }}
+                />
+              ))}
+
+              {/* OSM Graph nodes overlay */}
+              {dataSource === 'osm' && osmNodes.map((node, i) => {
+                const q = node.quadrant ?? 'SAFE';
+                const color = q === 'CRITICAL' ? '#EF4444' : q === 'RELIABLE' ? '#3B82F6' : q === 'UNCERTAIN' ? '#EAB308' : '#22C55E';
+                return (
+                  <CircleMarker
+                    key={`osm-node-${i}`}
+                    center={[node.y, node.x]}
+                    radius={q === 'CRITICAL' ? 5 : 3}
+                    pathOptions={{ fillColor: color, color, weight: 1, fillOpacity: 0.85, opacity: 0.9 }}
+                  >
+                    <Popup>
+                      <div className="text-xs">
+                        <div className="font-bold mb-1">Node {node.id?.toString().slice(-6)}</div>
+                        <div>BC: {node.meanBC?.toFixed(3)} | σ: {node.stdBC?.toFixed(3)}</div>
+                        <div className="font-bold mt-1" style={{ color }}>{q}</div>
+                      </div>
+                    </Popup>
+                  </CircleMarker>
+                );
+              })}
+
               {/* Hook to capture coordinates on mousemove */}
               <div className="hidden">
                 <MapEventHandler onMouseMove={(latlng) => setHoverCoords([latlng.lat, latlng.lng])} />
               </div>
             </MapContainer>
+
+            {/* OSM graph overlay — rendered on top of Leaflet as SVG-style polylines */}
+            {/* (These are inside MapContainer via Leaflet Polyline, added below) */}
           </div>
 
           {/* Info bar coordinates (bottom of map) */}
