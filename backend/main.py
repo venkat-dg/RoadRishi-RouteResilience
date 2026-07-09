@@ -11,6 +11,7 @@ from preprocessing import PreprocessPipeline
 from model import RoadSegFormer
 from healing import GraphHealingEngine
 from resilience import CriticalityVarianceEngine
+from osm_graph import OSMGraphLoader, build_synthetic_city_graph, OSMNX_AVAILABLE
 
 app = FastAPI(title="RoadRishi Geospatial Intelligence Pipeline", version="1.0.0")
 
@@ -163,6 +164,115 @@ def run_pipeline(
             "canopy": ndvi_hist_counts_canopy
         }
     }
+
+
+# ---------------------------------------------------------------------------
+# /api/osm-pipeline — Real OSM city graph endpoint
+# ---------------------------------------------------------------------------
+@app.get("/api/osm-pipeline")
+def run_osm_pipeline(
+    city: str = Query("Bengaluru", description="Indian city name"),
+    disruption_pct: float = Query(0.3, ge=0.0, le=0.9, description="Fraction of edges to disrupt (0–0.9)"),
+    disruption_mode: str = Query("random", description="Disruption mode: random | bridge | cascade | node"),
+    mc_samples: int = Query(20, description="Monte Carlo graph samples for BC variance"),
+    use_cache: bool = Query(True, description="Use cached GraphML if available"),
+):
+    """
+    Runs the RoadRishi pipeline on a REAL OpenStreetMap city graph.
+
+    1. Loads / fetches the OSM road network for the given city.
+    2. Simulates a disaster using the chosen disruption mode.
+    3. Computes resilience metrics (RI, LCC, Fiedler) before and after.
+    4. Returns the same JSON schema as /api/pipeline for full frontend compatibility.
+
+    Falls back to a synthetic grid graph if osmnx is not installed.
+    """
+    loader = OSMGraphLoader()
+    resilience_engine = CriticalityVarianceEngine(num_samples=mc_samples)
+
+    # --- 1. Load graph (real OSM or synthetic fallback) ---
+    using_real_osm = False
+    if OSMNX_AVAILABLE:
+        try:
+            G_osm = loader.fetch_city_graph(city, use_cache=use_cache)
+            G_full, pos_dict = loader.to_networkx(G_osm)
+            using_real_osm = True
+        except Exception as e:
+            print(f"[OSM] Failed to load real graph: {e} — falling back to synthetic")
+            G_full, pos_dict = build_synthetic_city_graph(city)
+    else:
+        G_full, pos_dict = build_synthetic_city_graph(city)
+
+    # --- 2. Simulate disaster ---
+    G_disrupted = loader.simulate_disaster(
+        G_full, pct=disruption_pct, mode=disruption_mode, seed=42
+    )
+
+    # --- 3. Resilience metrics ---
+    ri_metrics = resilience_engine.compute_resilience_index(G_full, G_disrupted, G_disrupted)
+    node_stats, top_priorities = resilience_engine.run_monte_carlo(G_disrupted, [])
+
+    # --- 4. Serialize graphs ---
+    graph_full = loader.serialize_graph_for_api(G_full, pos_dict, node_stats=None, city_name=city)
+    graph_disrupted = loader.serialize_graph_for_api(G_disrupted, pos_dict, node_stats=node_stats, city_name=city)
+
+    return {
+        "meta": {
+            "city": city,
+            "using_real_osm": using_real_osm,
+            "disruption_pct": disruption_pct,
+            "disruption_mode": disruption_mode,
+            "original_nodes": G_full.number_of_nodes(),
+            "original_edges": G_full.number_of_edges(),
+            "disrupted_edges": G_disrupted.number_of_edges(),
+        },
+        "graphs": {
+            "pre_disruption": graph_full,
+            "disrupted": graph_disrupted,
+            "healed": graph_disrupted,   # Healing on OSM graph is Phase 4 task
+        },
+        "healed_log": [],
+        "metrics": {
+            "RI_estimate": ri_metrics["RI_healed"],
+            "connectivity_gain_pct": ri_metrics["connectivity_gain"],
+            "LCC": ri_metrics["LCC"],
+            "Fiedler": ri_metrics["FiedlerLambda"],
+            # Placeholder segmentation metrics (real model not yet loaded)
+            "mIoU": None,
+            "dice_score": None,
+            "occlusion_recall": None,
+            "relaxed_iou": None,
+            "apls_score": None,
+        },
+        "re_tasking_priorities": top_priorities,
+    }
+
+
+# ---------------------------------------------------------------------------
+# /api/checkpoint-status — Reports whether real model weights are loaded
+# ---------------------------------------------------------------------------
+@app.get("/api/checkpoint-status")
+def checkpoint_status():
+    """
+    Returns whether the SegFormer real checkpoint is loaded
+    or the system is running in simulation mode.
+    """
+    checkpoint_path = os.path.join(
+        os.path.dirname(__file__), "..", "training", "checkpoints", "roadrishi_finetuned.pth"
+    )
+    real_loaded = os.path.exists(checkpoint_path)
+    return {
+        "mode": "live_model" if real_loaded else "simulation",
+        "checkpoint_path": checkpoint_path,
+        "checkpoint_exists": real_loaded,
+        "osmnx_available": OSMNX_AVAILABLE,
+        "message": (
+            "Real SegFormer checkpoint loaded — live inference active."
+            if real_loaded
+            else "Running in simulation mode. Train and export checkpoint to enable live inference."
+        ),
+    }
+
 
 # Serving the static frontend code
 frontend_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "frontend")
