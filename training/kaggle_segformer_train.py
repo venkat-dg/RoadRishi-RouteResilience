@@ -124,7 +124,7 @@ CFG = {
     "lr":           5e-5,
     "weight_decay": 1e-4,
     "val_split":    0.1,
-    "num_workers":  2,          # 2 is safe; persistent_workers=False avoids deadlocks
+    "num_workers":  0,          # 0 = main process only; eliminates Kaggle Docker worker deadlocks
     "seed":         42,
 
     # Loss
