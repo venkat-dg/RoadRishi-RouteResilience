@@ -40,7 +40,13 @@ from PIL import Image
 
 import torch
 import torch.nn as nn
-from torch.cuda.amp import autocast, GradScaler
+# Use the non-deprecated AMP API (torch >= 2.0; torch.cuda.amp still works but warns on >=2.4)
+try:
+    from torch.amp import autocast, GradScaler          # torch >= 2.0
+    _AMP_DEVICE = "cuda"
+except ImportError:
+    from torch.cuda.amp import autocast, GradScaler     # torch < 2.0 fallback
+    _AMP_DEVICE = None  # old API doesn't need device arg
 from torch.utils.data import Dataset, DataLoader
 from transformers import SegformerForSemanticSegmentation
 import albumentations as A
@@ -150,12 +156,13 @@ def build_dataloaders(cfg):
     n = max(1, int(len(pairs)*cfg["val_split"]))
     tr, va = pairs[n:], pairs[:n]
     nw = cfg["num_workers"]
+    _pin = torch.cuda.is_available()   # pin_memory requires CUDA; crashes silently on CPU
     tl = DataLoader(DeepGlobeDataset([p[0] for p in tr],[p[1] for p in tr],train_transform),
                     batch_size=cfg["batch_size"], shuffle=True, num_workers=nw,
-                    pin_memory=True, persistent_workers=False)
+                    pin_memory=_pin, persistent_workers=False)
     vl = DataLoader(DeepGlobeDataset([p[0] for p in va],[p[1] for p in va],val_transform),
                     batch_size=cfg["batch_size"]*2, shuffle=False, num_workers=nw,
-                    pin_memory=True, persistent_workers=False)
+                    pin_memory=_pin, persistent_workers=False)
     print(f"Train {len(tr)} | Val {len(va)}")
     return tl, vl
 
@@ -255,6 +262,10 @@ def load_checkpoint(path, model, optimizer, scheduler, scaler):
     print(f"  ✅ Resuming from epoch {start}  (best mIoU so far: {best:.4f})\n")
     return start, best, log
 
+# ── Safe float format (handles nan/inf without crashing) ─────────────────────
+def _fmt(v, fmt=".4f"):
+    return f"{v:{fmt}}" if isinstance(v, float) and math.isfinite(v) else str(v)
+
 # ── Training loop (OOM-safe, NaN-safe) ────────────────────────────────────────
 def train_one_epoch(model, loader, optimizer, criterion, scaler, epoch):
     model.train()
@@ -269,19 +280,25 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, epoch):
             pv = batch["pixel_values"].to(DEVICE, non_blocking=True)
             lb = batch["labels"].to(DEVICE, non_blocking=True)
 
-            with autocast(enabled=use_amp):
-                out  = model(pixel_values=pv)
+            # ── Forward pass inside AMP context ───────────────────────────
+            _dev = _AMP_DEVICE if _AMP_DEVICE else "cuda"
+            with autocast(device_type=_dev, enabled=use_amp):
+                out    = model(pixel_values=pv)
                 logits = get_logits(out)
-                up   = nn.functional.interpolate(logits, size=lb.shape[-2:],
-                                                 mode="bilinear", align_corners=False)
-                loss = criterion(up, lb) / grad_accum
+                up     = nn.functional.interpolate(logits, size=lb.shape[-2:],
+                                                   mode="bilinear", align_corners=False)
+                loss   = criterion(up, lb) / grad_accum
 
-            if not math.isfinite(loss.item() * grad_accum):
+            # ── NaN guard: check BEFORE backward to avoid graph corruption ─
+            raw_loss = loss.item() * grad_accum
+            if not math.isfinite(raw_loss):
                 skipped_nan += 1
-                optimizer.zero_grad()
+                optimizer.zero_grad()   # discard any partial gradients
+                torch.cuda.empty_cache()
                 if skipped_nan > 10:
-                    print("\n  ⚠️  >10 NaN steps — disabling AMP")
-                    CFG["use_amp"] = False; use_amp = False
+                    print("\n  ⚠️  >10 NaN steps — disabling AMP and continuing in fp32")
+                    CFG["use_amp"] = False
+                    use_amp = False
                 continue
 
             scaler.scale(loss).backward()
@@ -290,11 +307,14 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, epoch):
                 scaler.unscale_(optimizer)
                 nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 old_scale = scaler.get_scale()
-                scaler.step(optimizer); scaler.update()
-                if scaler.get_scale() < old_scale: skipped_nan += 1
+                scaler.step(optimizer)
+                scaler.update()
+                # Scaler shrinks when it detects inf/NaN gradients — count it
+                if scaler.get_scale() < old_scale:
+                    skipped_nan += 1
                 optimizer.zero_grad()
 
-            lv = loss.item() * grad_accum
+            lv = raw_loss
             with torch.no_grad():
                 miou = compute_miou(up.argmax(1).cpu(), lb.cpu())
             total_loss += lv; total_miou += miou; valid += 1
@@ -325,7 +345,8 @@ def evaluate(model, loader, criterion, epoch):
         try:
             pv = batch["pixel_values"].to(DEVICE, non_blocking=True)
             lb = batch["labels"].to(DEVICE, non_blocking=True)
-            with autocast(enabled=use_amp):
+            _dev = _AMP_DEVICE if _AMP_DEVICE else "cuda"
+            with autocast(device_type=_dev, enabled=use_amp):
                 out    = model(pixel_values=pv)
                 logits = get_logits(out)
                 up     = nn.functional.interpolate(logits, size=lb.shape[-2:],
@@ -382,9 +403,10 @@ def main():
 
         elapsed = time.time()-t0
         eta     = elapsed * (CFG["num_epochs"]-epoch)
+        # _fmt() prevents ValueError crash when loss=nan (e.g. all batches skipped)
         print(f"Epoch {epoch:2d}/{CFG['num_epochs']} | "
-              f"Train {train_loss:.4f}/{train_miou:.4f} | "
-              f"Val {val_loss:.4f}/{val_miou:.4f} | "
+              f"Train {_fmt(train_loss)}/{_fmt(train_miou)} | "
+              f"Val {_fmt(val_loss)}/{_fmt(val_miou)} | "
               f"{elapsed/60:.1f} min | ETA {eta/3600:.1f} h")
 
         row = {
