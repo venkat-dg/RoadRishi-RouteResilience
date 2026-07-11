@@ -227,10 +227,10 @@ def test_disaster_stress_sweep():
         ri_values.append(ri)
         print(f"    {int(pct*100):>11}%  {ri:>8.3f}  {lcc:>8}  {fiedler:>10.4f}")
 
-    # RI should be generally decreasing
+    # RI should be non-increasing as disruption increases
     drops = sum(1 for i in range(1, len(ri_values)) if ri_values[i] <= ri_values[i - 1])
-    assert drops >= len(pct_levels) // 2, \
-        f"RI should mostly decrease as disruption increases. Drops: {drops}/{len(pct_levels)-1}"
+    assert drops == len(ri_values) - 1, \
+        f"RI must be non-increasing as disruption increases. Drops: {drops}/{len(ri_values)-1}"
 
 
 # ---------------------------------------------------------------------------

@@ -90,8 +90,8 @@ class RoadSegFormer(base_class):
             self.real_model.eval()
 
             self.is_live = True
-            val_miou = ckpt.get("val_miou", "N/A")
-            print(f"[RoadSegFormer] Live model loaded ✓  val_mIoU={val_miou}  device={self.device}")
+            val_miou = ckpt.get("best_miou", ckpt.get("val_miou", "N/A"))
+            print(f"[RoadSegFormer] Live model loaded ✓  best_mIoU={val_miou}  device={self.device}")
             return True
 
         except Exception as e:

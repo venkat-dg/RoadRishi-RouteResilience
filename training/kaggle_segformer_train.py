@@ -20,6 +20,10 @@ Crash defences:
   ✅ VRAM check          → warns before training if headroom is low
 """
 
+# ── Forced Albumentations Upgrade ──────────────────────────────────────────────
+import subprocess, sys
+subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", "albumentations>=1.4.15"], check=True)
+
 # ── Dependency check ───────────────────────────────────────────────────────────
 import importlib, sys
 for pkg, (maj, mn) in {"transformers": (4, 37), "albumentations": (1, 4)}.items():

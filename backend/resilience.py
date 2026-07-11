@@ -67,8 +67,9 @@ class CriticalityVarianceEngine:
         lcc_ratio_disrupted = lcc_disrupted / lcc_pre if lcc_pre > 0 else 0.0
         lcc_ratio_healed = lcc_post / lcc_pre if lcc_pre > 0 else 0.0
         
-        lambda_ratio_disrupted = lambda_disrupted / lambda_pre if lambda_pre > 0 else 0.0
-        lambda_ratio_healed = lambda_post / lambda_pre if lambda_pre > 0 else 0.0
+        # Clip the algebraic-connectivity ratio to [0, 1] so a smaller remnant cannot appear more resilient than the original graph.
+        lambda_ratio_disrupted = min(1.0, max(0.0, (lambda_disrupted / lambda_pre) * lcc_ratio_disrupted)) if lambda_pre > 0 else 0.0
+        lambda_ratio_healed = min(1.0, max(0.0, (lambda_post / lambda_pre) * lcc_ratio_healed)) if lambda_pre > 0 else 0.0
 
         # Disruption RI vs Healed RI
         ri_disrupted = self.wc * lcc_ratio_disrupted + self.wd * lambda_ratio_disrupted

@@ -1,7 +1,7 @@
 torch>=2.1
 torchvision
 transformers>=4.37
-albumentations>=1.4
+albumentations>=1.4.15
 evaluate
 scikit-learn
 tqdm

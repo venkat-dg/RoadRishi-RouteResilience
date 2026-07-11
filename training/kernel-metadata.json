@@ -1,0 +1,16 @@
+{
+  "id": "your-kaggle-username/roadrishi-training",
+  "_comment": "TODO: Replace 'your-kaggle-username' in 'id' with your actual Kaggle username",
+  "title": "RoadRishi Training",
+  "code_file": "kaggle_segformer_train.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "true",
+  "dataset_sources": [
+    "balraj98/deepglobe-road-extraction-dataset"
+  ],
+  "competition_sources": [],
+  "kernel_sources": []
+}

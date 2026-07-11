@@ -210,13 +210,17 @@ export default function App() {
   const [scene, setScene] = useState('Bengaluru Urban 5km²');
 
   // ── OSM / Data Source state ──────────────────────────────────────────────
-  const [dataSource, setDataSource] = useState('simulation'); // 'simulation' | 'osm'
+  const [dataSource, setDataSource] = useState('simulation'); // 'simulation' | 'osm' | 'live_model'
   const [osmCity, setOsmCity] = useState('Bengaluru');
   const [disruptionMode, setDisruptionMode] = useState('random');
   const [disruptionPct, setDisruptionPct] = useState(0.30);
   const [osmLoading, setOsmLoading] = useState(false);
   const [osmData, setOsmData] = useState(null);          // raw API response
   const [osmError, setOsmError] = useState(null);
+  const [liveLoading, setLiveLoading] = useState(false);
+  const [liveData, setLiveData] = useState(null);        // raw API response
+  const [liveError, setLiveError] = useState(null);
+  const [selectedFile, setSelectedFile] = useState(null);
   const [checkpointMode, setCheckpointMode] = useState('simulation'); // 'simulation' | 'live_model'
 
   // OSM city configs for map centering
@@ -264,10 +268,113 @@ export default function App() {
       });
   }, [osmCity, disruptionPct, disruptionMode]);
 
+  const fetchLiveModelData = useCallback(() => {
+    if (!selectedFile) {
+      setLiveError('Please upload an image before running live segmentation.');
+      return;
+    }
+    setLiveLoading(true);
+    setLiveError(null);
+    const formData = new FormData();
+    formData.append('image', selectedFile);
+    fetch(`${API_BASE}/api/segment-live`, {
+      method: 'POST',
+      body: formData,
+    })
+      .then(async r => {
+        const data = await r.json();
+        if (!r.ok || data.live === false) {
+          throw new Error(data.message || 'Live segmentation failed.');
+        }
+        setLiveData(data);
+        setLiveLoading(false);
+        setMapCenter([12.9716, 77.5946]);
+        setMapZoom(15);
+        setToastMessage(`Live segmentation completed — ${data.metrics?.RI_estimate?.toFixed(3) ?? '?'} RI`);
+        setShowToast(true);
+        setTimeout(() => setShowToast(false), 4000);
+      })
+      .catch(err => {
+        setLiveError(err.message || 'Backend not reachable — start the FastAPI server.');
+        setLiveLoading(false);
+      });
+  }, [selectedFile]);
+
   // Derived OSM graph layers (edges as polylines)
   const osmEdges = osmData?.graphs?.disrupted?.edges ?? [];
   const osmNodes = osmData?.graphs?.disrupted?.nodes ?? [];
   const osmMetrics = osmData?.metrics ?? null;
+
+  const pixelToMapPosition = (pos, sceneSize) => {
+    if (!pos || !sceneSize) return [mapCenter[0], mapCenter[1]];
+    const [y, x] = pos;
+    const height = sceneSize?.height ?? 1000;
+    const width = sceneSize?.width ?? 1000;
+    const lat = mapCenter[0] + ((y / height) - 0.5) * 0.01;
+    const lng = mapCenter[1] + ((x / width) - 0.5) * 0.01;
+    return [lat, lng];
+  };
+
+  const liveNodes = (liveData?.graphs?.healed?.nodes ?? []).map(node => ({
+    id: node.id,
+    lat: pixelToMapPosition([node.y, node.x], liveData?.scene)[0],
+    lng: pixelToMapPosition([node.y, node.x], liveData?.scene)[1],
+    meanBC: node.meanBC ?? 0,
+    stdBC: node.stdBC ?? 0,
+    pe: 0.75,
+    quadrant: node.quadrant ?? 'SAFE'
+  }));
+
+  const liveRoadSegments = (liveData?.graphs?.healed?.edges ?? []).map((edge, idx) => ({
+    id: `live-edge-${idx}`,
+    coords: [pixelToMapPosition(edge.u_pos, liveData?.scene), pixelToMapPosition(edge.v_pos, liveData?.scene)],
+    stdBC: 0.5,
+  }));
+
+  const liveRoadSegmentsPreHeal = (liveData?.graphs?.pre_disruption?.edges ?? []).map((edge, idx) => ({
+    id: `live-pre-edge-${idx}`,
+    coords: [pixelToMapPosition(edge.u_pos, liveData?.scene), pixelToMapPosition(edge.v_pos, liveData?.scene)],
+    stdBC: 0.5,
+  }));
+
+  const liveHealedEdges = (liveData?.healed_log ?? []).map((edge, idx) => ({
+    id: `live-healed-${idx}`,
+    coords: [pixelToMapPosition(edge.u_pos, liveData?.scene), pixelToMapPosition(edge.v_pos, liveData?.scene)],
+    pe: edge.pe ?? 0.5,
+    status: (edge.pe ?? 0.5) >= 0.4 ? 'healed' : 'rejected',
+    length: edge.length ?? 0,
+  }));
+
+  const liveOcclusionZones = (liveData?.occlusion_zones ?? []).map((zone, idx) => {
+    const [y, x] = zone.center || [0, 0];
+    const radius = zone.radius || 40;
+    const center = pixelToMapPosition([y, x], liveData?.scene);
+    return [
+      [center[0] - 0.0015, center[1] - 0.0015],
+      [center[0] + 0.0015, center[1] - 0.0015],
+      [center[0] + 0.0015, center[1] + 0.0015],
+      [center[0] - 0.0015, center[1] + 0.0015],
+    ];
+  });
+
+  const displayMetrics = dataSource === 'live_model' && liveData ? {
+    mIoU: liveData.metrics?.mIoU ?? 0,
+    occlusionRecall: liveData.metrics?.occlusion_recall ?? 0,
+    dice: liveData.metrics?.dice_score ?? 0,
+    relaxedIoU: liveData.metrics?.relaxed_iou ?? 0,
+    connectivityBefore: 0.45,
+    connectivityAfter: Math.max(0.0, liveData.metrics?.RI_estimate ?? 0.0),
+    apls: liveData.metrics?.apls_score ?? 0,
+    resilienceIndex: liveData.metrics?.RI_estimate ?? 0,
+    lccRatio: liveData.metrics?.LCC?.healed ?? 0,
+    fiedler: liveData.metrics?.Fiedler?.healed ?? 0,
+  } : METRICS;
+
+  const displayNodes = dataSource === 'live_model' && liveData ? liveNodes : NODES;
+  const displayRoadSegments = dataSource === 'live_model' && liveData ? liveRoadSegments : ROAD_SEGMENTS;
+  const displayRoadSegmentsPreHeal = dataSource === 'live_model' && liveData ? liveRoadSegmentsPreHeal : ROAD_SEGMENTS_PRE_HEAL;
+  const displayHealedEdges = dataSource === 'live_model' && liveData ? liveHealedEdges : HEALED_EDGES;
+  const displayOcclusionZones = dataSource === 'live_model' && liveData ? liveOcclusionZones : OCCLUSION_ZONES;
   
   // Sliders state
   const [confidenceThreshold, setConfidenceThreshold] = useState(0.50);
@@ -386,8 +493,8 @@ export default function App() {
 
   // Filter nodes by selected risk quadrant
   const filteredNodes = selectedQuadrant
-    ? NODES.filter(node => getNodeRisk(node).label === selectedQuadrant)
-    : NODES;
+    ? displayNodes.filter(node => getNodeRisk(node).label === selectedQuadrant)
+    : displayNodes;
 
   return (
     <div className="h-screen w-screen bg-[var(--bg-base)] text-[var(--text-primary)] font-sans flex flex-col overflow-hidden relative">
@@ -498,6 +605,17 @@ export default function App() {
                 >
                   <Globe size={10} /> Real OSM
                 </button>
+                <button
+                  onClick={() => checkpointMode === 'live_model' && setDataSource('live_model')}
+                  disabled={checkpointMode !== 'live_model'}
+                  className={`flex-1 py-1.5 text-xs font-semibold rounded-md transition-all text-center cursor-pointer flex items-center justify-center gap-1 ${
+                    dataSource === 'live_model'
+                      ? 'bg-emerald-900/60 text-emerald-300 shadow'
+                      : 'text-[var(--text-secondary)] hover:text-white'
+                  } ${checkpointMode !== 'live_model' ? 'opacity-50 cursor-not-allowed' : ''}`}
+                >
+                  <Zap size={10} /> Live Model
+                </button>
               </div>
             </div>
 
@@ -576,6 +694,39 @@ export default function App() {
 
                 {osmError && (
                   <div className="bg-red-950/30 border border-red-900/40 rounded-md p-2 text-[11px] text-red-400">{osmError}</div>
+                )}
+              </div>
+            )}
+
+            {/* ── Live model upload (shown only in live_model mode) ── */}
+            {dataSource === 'live_model' && (
+              <div className="space-y-3 mb-4 animate-pulse-once">
+                <div>
+                  <label className="block text-[11px] text-[#64748B] mb-1.5">Upload Satellite Tile</label>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => setSelectedFile(e.target.files?.[0] || null)}
+                    className="w-full text-[12px] text-slate-300 file:mr-3 file:py-2 file:px-3 file:rounded-md file:border-0 file:bg-emerald-900/40 file:text-emerald-300 file:font-semibold"
+                  />
+                </div>
+                <button
+                  onClick={fetchLiveModelData}
+                  disabled={liveLoading}
+                  className="w-full py-2 bg-gradient-to-r from-emerald-900 to-emerald-700 hover:from-emerald-800 hover:to-emerald-600 disabled:opacity-50 rounded-md text-white font-semibold text-[12px] flex items-center justify-center gap-2 cursor-pointer transition-all duration-150"
+                >
+                  {liveLoading ? <><RotateCw size={12} className="animate-spin" /> Running...</> : <><Zap size={12} /> Run Live Segmentation</>}
+                </button>
+                {liveData && (
+                  <div className="bg-emerald-950/20 border border-emerald-900/40 rounded-md p-2.5 text-[11px] space-y-1 font-mono">
+                    <div className="text-emerald-300 font-semibold text-[10px] uppercase tracking-wider mb-1.5">Live Result</div>
+                    <div className="flex justify-between"><span className="text-slate-400">RI</span><span className="text-white">{liveData.metrics?.RI_estimate?.toFixed(3)}</span></div>
+                    <div className="flex justify-between"><span className="text-slate-400">mIoU</span><span className="text-white">{liveData.metrics?.mIoU?.toFixed(3)}</span></div>
+                    <div className="flex justify-between"><span className="text-slate-400">Healed edges</span><span className="text-white">{liveData.healed_log?.length ?? 0}</span></div>
+                  </div>
+                )}
+                {liveError && (
+                  <div className="bg-red-950/30 border border-red-900/40 rounded-md p-2 text-[11px] text-red-400">{liveError}</div>
                 )}
               </div>
             )}
@@ -876,7 +1027,7 @@ export default function App() {
               />
 
               {/* 1. Road Segmentation polylines */}
-              {layersVisibility.segmentation && (isBeforeHealing ? ROAD_SEGMENTS_PRE_HEAL : ROAD_SEGMENTS).map(seg => (
+              {layersVisibility.segmentation && (isBeforeHealing ? displayRoadSegmentsPreHeal : displayRoadSegments).map(seg => (
                 <React.Fragment key={seg.id}>
                   {/* Glow layer (underneath) */}
                   <Polyline
@@ -898,7 +1049,7 @@ export default function App() {
               ))}
 
               {/* 2. Confidence Heatmap (blurred cyan layer underneath) */}
-              {layersVisibility.confidence && ROAD_SEGMENTS.map(seg => (
+              {layersVisibility.confidence && displayRoadSegments.map(seg => (
                 <Polyline
                   key={`conf-${seg.id}`}
                   positions={seg.coords}
@@ -907,7 +1058,7 @@ export default function App() {
               ))}
 
               {/* 3. Healed Edges */}
-              {layersVisibility.healedEdges && !isBeforeHealing && HEALED_EDGES.map(edge => {
+              {layersVisibility.healedEdges && !isBeforeHealing && displayHealedEdges.map(edge => {
                 const isAccepted = edge.pe >= 0.40;
                 return (
                   <Polyline
@@ -963,7 +1114,7 @@ export default function App() {
               })}
 
               {/* 5. Occlusion Zones */}
-              {layersVisibility.occlusionZones && OCCLUSION_ZONES.map((zone, idx) => (
+              {layersVisibility.occlusionZones && displayOcclusionZones.map((zone, idx) => (
                 <Polygon
                   key={`zone-${idx}`}
                   positions={zone}
@@ -1043,10 +1194,10 @@ export default function App() {
               {/* 2x2 Metric Cards */}
               <div className="grid grid-cols-2 gap-3.5">
                 {[
-                  { label: 'mIoU', val: METRICS.mIoU, format: 'toFixed(3)', target: 'Target ≥ 0.75', isMet: METRICS.mIoU >= 0.75 },
-                  { label: 'Occlusion-Recall', val: METRICS.occlusionRecall, format: 'toFixed(3)', target: 'Target ≥ 0.68', isMet: METRICS.occlusionRecall >= 0.68 },
-                  { label: 'Dice Score', val: METRICS.dice, format: 'toFixed(3)', target: null },
-                  { label: 'Relaxed IoU', val: METRICS.relaxedIoU, format: 'toFixed(3)', target: '4px buffer (23m)' }
+                  { label: 'mIoU', val: displayMetrics.mIoU, format: 'toFixed(3)', target: 'Target ≥ 0.75', isMet: displayMetrics.mIoU >= 0.75 },
+                  { label: 'Occlusion-Recall', val: displayMetrics.occlusionRecall, format: 'toFixed(3)', target: 'Target ≥ 0.68', isMet: displayMetrics.occlusionRecall >= 0.68 },
+                  { label: 'Dice Score', val: displayMetrics.dice, format: 'toFixed(3)', target: null },
+                  { label: 'Relaxed IoU', val: displayMetrics.relaxedIoU, format: 'toFixed(3)', target: '4px buffer (23m)' }
                 ].map(card => (
                   <div
                     key={card.label}
