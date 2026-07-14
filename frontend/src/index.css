@@ -2,6 +2,14 @@
 
 @import "tailwindcss";
 
+/* Tailwind v4: theme customization lives in CSS, not tailwind.config.js */
+@theme {
+  --font-sans: "Inter", sans-serif;
+  --font-outfit: "Outfit", sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", monospace;
+}
+
+
 :root {
   --bg-base:       #0B0F1A;
   --bg-card:       #0F1724;

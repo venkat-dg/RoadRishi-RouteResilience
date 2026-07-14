@@ -415,12 +415,12 @@ def checkpoint_status():
     Returns whether the SegFormer real checkpoint is loaded
     or the system is running in simulation mode.
     """
-    status = model_core.get_status()
+    status_info = model_core.get_status()  # renamed to avoid shadowing fastapi.status
     return {
-        "mode": status["mode"],
+        "mode": status_info["mode"],
         "checkpoint_exists": model_core.is_live,
         "osmnx_available": OSMNX_AVAILABLE,
-        "device": status["device"],
+        "device": status_info["device"],
         "message": (
             "Real SegFormer checkpoint loaded — live inference active."
             if model_core.is_live

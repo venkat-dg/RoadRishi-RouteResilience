@@ -86,13 +86,13 @@ CFG = {
     "model_name":   "nvidia/segformer-b3-finetuned-ade-512-512",
     "num_labels":   2,
     "img_size":     384,
-    "batch_size":   4,
+    "batch_size":   8,       # Increased from 4 to 8 to utilize the 15GB VRAM on T4x2 GPUs
     "grad_accum":   2,
     "num_epochs":   8,
     "lr":           5e-5,
     "weight_decay": 1e-4,
     "val_split":    0.1,
-    "num_workers":  0,       # 0 = no subprocess workers → no Kaggle deadlocks
+    "num_workers":  2,       # Set to 2 so disk I/O doesn't bottleneck GPU execution
     "seed":         42,
     "bce_weight":   1.0,
     "dice_weight":  1.0,

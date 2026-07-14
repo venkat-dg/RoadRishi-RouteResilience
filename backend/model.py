@@ -9,9 +9,6 @@ try:
     HAS_TORCH = True
 except ImportError:
     HAS_TORCH = False
-    class nn_Module: pass
-    nn = nn_Module
-    nn.Module = object
 
 # Try importing transformers for real SegFormer inference
 try:
@@ -25,7 +22,16 @@ DEFAULT_CHECKPOINT = os.path.join(
     os.path.dirname(__file__), "..", "training", "checkpoints", "roadrishi_finetuned.pth"
 )
 
-base_class = nn.Module if HAS_TORCH else object
+# Build base class AFTER all imports so the fallback is correct
+if HAS_TORCH:
+    base_class = nn.Module
+else:
+    # Provide a no-op stub so RoadSegFormer can be defined without torch
+    import types as _types
+    _nn_stub = _types.SimpleNamespace()
+    _nn_stub.Module = object
+    nn = _nn_stub  # type: ignore[assignment]
+    base_class = object
 
 class RoadSegFormer(base_class):
     """

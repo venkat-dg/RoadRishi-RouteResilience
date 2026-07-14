@@ -134,7 +134,16 @@ const ALERTS = [
 ];
 
 // Helper to determine node risk color and label
+// Uses `quadrant` field from API when present (OSM / live mode), otherwise
+// falls back to threshold-based classification for simulation data.
 function getNodeRisk(node) {
+  const q = node.quadrant;
+  if (q === 'CRITICAL') return { color: '#EF4444', label: 'CRITICAL', short: 'C' };
+  if (q === 'RELIABLE') return { color: '#3B82F6', label: 'RELIABLE', short: 'R' };
+  if (q === 'UNCERTAIN') return { color: '#EAB308', label: 'UNCERTAIN', short: 'U' };
+  if (q === 'SAFE')     return { color: '#22C55E', label: 'SAFE',     short: 'S' };
+
+  // Fallback: compute from raw BC values (simulation mock data has no quadrant field)
   if (node.meanBC > 0.7 && node.stdBC > 0.5) {
     return { color: '#EF4444', label: 'CRITICAL', short: 'C' };
   }
@@ -1164,14 +1173,11 @@ export default function App() {
                 );
               })}
 
-              {/* Hook to capture coordinates on mousemove */}
-              <div className="hidden">
-                <MapEventHandler onMouseMove={(latlng) => setHoverCoords([latlng.lat, latlng.lng])} />
-              </div>
+              {/* Mouse-move coordinate capture — must live inside MapContainer */}
+              <MapEventHandler onMouseMove={(latlng) => setHoverCoords([latlng.lat, latlng.lng])} />
+
             </MapContainer>
 
-            {/* OSM graph overlay — rendered on top of Leaflet as SVG-style polylines */}
-            {/* (These are inside MapContainer via Leaflet Polyline, added below) */}
           </div>
 
           {/* Info bar coordinates (bottom of map) */}

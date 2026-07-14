@@ -1,6 +1,12 @@
 import numpy as np
 import networkx as nx
-from scipy.linalg import eigh
+
+try:
+    from scipy.linalg import eigh as _scipy_eigh
+    HAS_SCIPY = True
+except ImportError:
+    HAS_SCIPY = False
+    _scipy_eigh = None
 
 class CriticalityVarianceEngine:
     """
@@ -36,11 +42,12 @@ class CriticalityVarianceEngine:
         except Exception:
             # Fallback manual calculation using SciPy eigh on Laplacians
             try:
-                L = nx.laplacian_matrix(sub_G).toarray()
-                eigenvals = eigh(L, eigvals_only=True)
-                # Second smallest eigenvalue
-                if len(eigenvals) > 1:
-                    return float(eigenvals[1])
+                if HAS_SCIPY and _scipy_eigh is not None:
+                    L = nx.laplacian_matrix(sub_G).toarray()
+                    eigenvals = _scipy_eigh(L, eigvals_only=True)
+                    # Second smallest eigenvalue
+                    if len(eigenvals) > 1:
+                        return float(eigenvals[1])
             except Exception:
                 pass
         return 0.0
