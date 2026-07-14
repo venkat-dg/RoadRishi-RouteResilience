@@ -1,5 +1,5 @@
 """
-RoadRishi — SegFormer Fine-Tuning Script (Kaggle-Ready, Crash-Proof + Resume)
+RoadRishi — SegFormer Fine-Tuning Script (Kaggle-Ready, Crash-Proof + Resume, Early stopping implemented)
 ==============================================================================
 Dataset: https://www.kaggle.com/datasets/balraj98/deepglobe-road-extraction-dataset
 
@@ -9,7 +9,7 @@ Instructions:
 3. If it crashes, just Run All again — it auto-resumes from the last checkpoint
 
 Expected runtime: ~2.5–3.5 hours on T4 x2
-  img_size=384  batch=4  grad_accum=2  epochs=8  AMP=True  num_workers=0
+  img_size=384  batch=8  grad_accum=2  epochs=8  AMP=True  num_workers=0
 
 Crash defences:
   ✅ CUDA OOM mid-batch  → skip batch, empty_cache, continue
@@ -98,6 +98,7 @@ CFG = {
     "dice_weight":  1.0,
     "use_amp":      True,
     "save_every":   2,
+    "early_stopping_patience": 3,
 }
 
 os.makedirs(CFG["output_dir"], exist_ok=True)
@@ -181,11 +182,15 @@ class DiceLoss(nn.Module):
 class CombinedLoss(nn.Module):
     def __init__(self, bw, dw):
         super().__init__()
-        self.bce=nn.CrossEntropyLoss(); self.dice=DiceLoss(); self.bw=bw; self.dw=dw
+        weights = torch.tensor([1.0, 4.0], device=DEVICE)
+        self.bce = nn.CrossEntropyLoss(weight=weights)
+        self.dice = DiceLoss()
+        self.bw = bw
+        self.dw = dw
     def forward(self, logits, targets):
         return self.bw*self.bce(logits,targets) + self.dw*self.dice(logits,targets)
 
-# ── mIoU ───────────────────────────────────────────────────────────────────────
+# ── mIoU and metrics (mIoU was extended with more verbose metrics computations)───────────────────────────────────────────────────────────────────────
 def compute_miou(preds, targets, nc=2):
     p,t = preds.view(-1), targets.view(-1)
     ious = []
@@ -194,6 +199,38 @@ def compute_miou(preds, targets, nc=2):
         inter=(pm&tm).sum().float(); union=(pm|tm).sum().float()
         ious.append(inter/union if union>0 else torch.tensor(1.0))
     return torch.stack(ious).mean().item()
+
+def compute_metrics(preds, targets):
+    preds   = preds.reshape(-1)
+    targets = targets.reshape(-1)
+
+    # Road class = 1
+    tp = ((preds == 1) & (targets == 1)).sum().float()
+    fp = ((preds == 1) & (targets == 0)).sum().float()
+    fn = ((preds == 0) & (targets == 1)).sum().float()
+    tn = ((preds == 0) & (targets == 0)).sum().float()
+
+    eps = 1e-7
+
+    iou_road = tp / (tp + fp + fn + eps)
+    iou_bg   = tn / (tn + fp + fn + eps)
+
+    miou = (iou_road + iou_bg) / 2
+
+    precision = tp / (tp + fp + eps)
+    recall    = tp / (tp + fn + eps)
+
+    f1 = 2 * precision * recall / (precision + recall + eps)
+
+    dice = 2 * tp / (2 * tp + fp + fn + eps)
+
+    return {
+        "miou": miou.item(),
+        "dice": dice.item(),
+        "f1": f1.item(),
+        "precision": precision.item(),
+        "recall": recall.item(),
+    }
 
 # ── Safe logits extractor ──────────────────────────────────────────────────────
 def get_logits(out):
@@ -273,7 +310,11 @@ def _fmt(v, fmt=".4f"):
 # ── Training loop (OOM-safe, NaN-safe) ────────────────────────────────────────
 def train_one_epoch(model, loader, optimizer, criterion, scaler, epoch):
     model.train()
-    total_loss = total_miou = valid = skipped_oom = skipped_nan = 0
+    valid = skipped_oom = skipped_nan = 0
+    total_loss = 0
+    total_miou = 0
+    total_dice = 0
+    total_f1   = 0
     use_amp    = CFG.get("use_amp", True)
     grad_accum = CFG.get("grad_accum", 1)
     pbar = tqdm(loader, desc=f"Epoch {epoch} [train]", leave=True)
@@ -320,10 +361,23 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, epoch):
 
             lv = raw_loss
             with torch.no_grad():
-                miou = compute_miou(up.argmax(1).cpu(), lb.cpu())
-            total_loss += lv; total_miou += miou; valid += 1
-            pbar.set_postfix(loss=f"{lv:.4f}", miou=f"{miou:.3f}",
-                             oom=skipped_oom, nan=skipped_nan)
+                # miou = compute_miou(up.argmax(1).cpu(), lb.cpu())
+                metrics = compute_metrics(
+                    up.argmax(1),
+                    lb
+                )
+            total_loss += lv
+            total_miou += metrics["miou"]
+            total_dice += metrics["dice"]
+            total_f1   += metrics["f1"]
+            valid += 1
+            pbar.set_postfix(
+                loss=f"{lv:.4f}",
+                miou=f"{metrics['miou']:.3f}",
+                dice=f"{metrics['dice']:.3f}",
+                oom=skipped_oom,
+                nan=skipped_nan
+            )
 
         except RuntimeError as e:
             if "out of memory" in str(e).lower():
@@ -334,16 +388,31 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, epoch):
             else:
                 raise
 
-    if valid == 0: return float("nan"), float("nan")
+    if valid == 0: 
+        return (
+            float("nan"),
+            float("nan"),
+            float("nan"),
+            float("nan")
+        )
     if skipped_oom + skipped_nan:
         print(f"  ℹ️  Skipped {skipped_oom} OOM + {skipped_nan} NaN out of {len(loader)}")
-    return total_loss/valid, total_miou/valid
+    return (
+        total_loss / valid,
+        total_miou / valid,
+        total_dice / valid,
+        total_f1 / valid
+    )
 
 # ── Eval loop ──────────────────────────────────────────────────────────────────
 @torch.no_grad()
 def evaluate(model, loader, criterion, epoch):
     model.eval()
-    total_loss = total_miou = valid = 0
+    valid = 0
+    total_loss = 0
+    total_miou = 0
+    total_dice = 0
+    total_f1   = 0
     use_amp = CFG.get("use_amp", True)
     for batch in tqdm(loader, desc=f"Epoch {epoch} [val]  ", leave=False):
         try:
@@ -358,13 +427,31 @@ def evaluate(model, loader, criterion, epoch):
                 loss   = criterion(up, lb)
             if not math.isfinite(loss.item()): continue
             total_loss += loss.item()
-            total_miou += compute_miou(up.argmax(1).cpu(), lb.cpu())
+            metrics = compute_metrics(
+                up.argmax(1),
+                lb
+            )
+
+            total_miou += metrics["miou"]
+            total_dice += metrics["dice"]
+            total_f1   += metrics["f1"]
             valid += 1
         except RuntimeError as e:
             if "out of memory" in str(e).lower(): torch.cuda.empty_cache()
             else: raise
-    if valid == 0: return float("nan"), float("nan")
-    return total_loss/valid, total_miou/valid
+    if valid == 0:
+        return (
+            float("nan"),
+            float("nan"),
+            float("nan"),
+            float("nan")
+        )
+    return (
+        total_loss / valid,
+        total_miou / valid,
+        total_dice / valid,
+        total_f1 / valid
+    )
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 def main():
@@ -373,10 +460,20 @@ def main():
     criterion = CombinedLoss(CFG["bce_weight"], CFG["dice_weight"])
     optimizer = torch.optim.AdamW(model.parameters(),
                                   lr=CFG["lr"], weight_decay=CFG["weight_decay"])
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                    optimizer, T_max=CFG["num_epochs"], eta_min=1e-6)
-    scaler    = GradScaler(enabled=CFG.get("use_amp", True))
-    best_miou = 0.0; log = []; start_epoch = 1
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    #                 optimizer, T_max=CFG["num_epochs"], eta_min=1e-6)
+
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer,
+        T_0=2,
+        T_mult=2,
+        eta_min=1e-6
+    )
+    scaler    = GradScaler("cuda", enabled=CFG.get("use_amp", True))
+    best_miou = 0.0
+    log = []
+    start_epoch = 1
+    epochs_without_improvement = 0
 
     # ── Auto-resume ────────────────────────────────────────────────────────────
     resume = find_resume_checkpoint(CFG["output_dir"])
@@ -399,19 +496,27 @@ def main():
 
     for epoch in range(start_epoch, CFG["num_epochs"]+1):
         t0 = time.time()
-        train_loss, train_miou = train_one_epoch(
+        train_loss, train_miou, train_dice, train_f1 = train_one_epoch(
             model, tl, optimizer, criterion, scaler, epoch)
-        val_loss, val_miou = evaluate(model, vl, criterion, epoch)
+        val_loss, val_miou, val_dice, val_f1 = evaluate(model, vl, criterion, epoch)
         scheduler.step()
         torch.cuda.empty_cache()
 
         elapsed = time.time()-t0
         eta     = elapsed * (CFG["num_epochs"]-epoch)
         # _fmt() prevents ValueError crash when loss=nan (e.g. all batches skipped)
-        print(f"Epoch {epoch:2d}/{CFG['num_epochs']} | "
-              f"Train {_fmt(train_loss)}/{_fmt(train_miou)} | "
-              f"Val {_fmt(val_loss)}/{_fmt(val_miou)} | "
-              f"{elapsed/60:.1f} min | ETA {eta/3600:.1f} h")
+        print(
+            f"Epoch {epoch:2d}/{CFG['num_epochs']} | "
+            f"Train Loss={_fmt(train_loss)} "
+            f"mIoU={_fmt(train_miou)} "
+            f"Dice={_fmt(train_dice)} "
+            f"F1={_fmt(train_f1)} | "
+            f"Val Loss={_fmt(val_loss)} "
+            f"mIoU={_fmt(val_miou)} "
+            f"Dice={_fmt(val_dice)} "
+            f"F1={_fmt(val_f1)} | "
+            f"{elapsed/60:.1f} min | ETA {eta/3600:.1f} h"
+        )
 
         row = {
             "epoch":      epoch,
@@ -421,16 +526,39 @@ def main():
             "val_miou":   round(val_miou,4)   if math.isfinite(val_miou)   else None,
             "lr":         round(scheduler.get_last_lr()[0],8),
             "secs":       round(elapsed,1),
+            "train_dice": round(train_dice,4) if math.isfinite(train_dice) else None,
+            "train_f1":   round(train_f1,4)   if math.isfinite(train_f1)   else None,
+            "val_dice":   round(val_dice,4)   if math.isfinite(val_dice)   else None,
+            "val_f1":     round(val_f1,4)     if math.isfinite(val_f1)     else None,
         }
         log.append(row)
 
         # Best checkpoint (full state for resume)
-        if math.isfinite(val_miou) and val_miou > best_miou:
+        if math.isfinite(val_miou) and val_miou > best_miou + 1e-4:
             best_miou = val_miou
-            best_path = os.path.join(CFG["output_dir"], "roadrishi_finetuned.pth")
-            _save_full(model, optimizer, scheduler, scaler,
-                       epoch, best_miou, val_loss, log, best_path)
+            epochs_without_improvement = 0
+
+            best_path = os.path.join(
+                CFG["output_dir"],
+                "roadrishi_finetuned.pth"
+            )
+
+            _save_full(
+                model,
+                optimizer,
+                scheduler,
+                scaler,
+                epoch,
+                best_miou,
+                val_loss,
+                log,
+                best_path
+            )
+
             print(f"  ✅ Best saved → val_mIoU={val_miou:.4f}")
+
+        else:
+            epochs_without_improvement += 1
 
         # Periodic checkpoint every N epochs
         if epoch % CFG.get("save_every",2) == 0:
@@ -438,9 +566,16 @@ def main():
             _save_full(model, optimizer, scheduler, scaler,
                        epoch, best_miou, val_loss, log, ppath)
             print(f"  💾 Periodic checkpoint → epoch {epoch}")
+        
+        if epochs_without_improvement >= CFG["early_stopping_patience"]:
+            print(
+                f"\n🛑 Early stopping triggered "
+                f"({epochs_without_improvement} epochs without improvement)"
+            )
+            break
 
         # Flush log after every epoch
-        with open(log_path,"w") as f:
+        with open(log_path,"w") as f:   
             json.dump(log, f, indent=2)
 
     print("\n" + "="*60)
